@@ -1,0 +1,5 @@
+.idea/*
+.snakemake/*
+results/*
+task1/*
+task2_raw/*

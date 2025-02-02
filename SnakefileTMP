@@ -1,0 +1,231 @@
+# snakemake --delete-all-output
+
+import os
+import yaml
+import datetime
+from pathlib import Path
+
+RAW_DIR = "."
+
+# Grab all *.raw filenames (full or relative paths)
+raw_paths = [
+    str(file)
+    for file in Path(RAW_DIR).iterdir()
+    if file.suffix == ".raw" or file.suffix = ".d.zip"
+]
+
+
+# Extract just the basenames without extension
+samples = [Path(path).stem for path in raw_paths]
+
+# After defining 'samples'
+mzml_files = expand(os.path.join(RAW_DIR, "{sample}.mzML"), sample=samples)
+dzip_files = expand(os.path.join(RAW_DIR, "{sample}.d.zip"), sample=samples)
+
+
+with open(os.path.join(RAW_DIR, "params.yml")) as f:
+    config_dict = yaml.safe_load(f)
+
+# Example: store some variables
+MSCONVERTOPTS = config_dict["params"]["01|msconvertopts"]
+MEMORY = config_dict["params"]["memory"]
+DIANNCUSTOMSEQ = config_dict["params"]["DIANNCUSTOMSEQ"]
+WORKUNITID = config_dict["registration"]["workunit_id"]
+
+# Output zip
+OUPUTZIP = f"output-WU{WORKUNITID}.zip"
+# Where we store DIA-NN output (similarly to out-<date>/ in Makefile)
+# WEW Not sure if this is a good idea?
+today_str = datetime.date.today().isoformat()  # e.g. 2025-01-10
+DIANNTEMP   = f"{os.getcwd()}/temp-{today_str}"
+DIANNOUTPUT = f"{os.getcwd()}/out-{today_str}"
+
+# Example placeholders for DIANN arguments:
+# DIANN = "/usr/diann/1.8.2_beta_8/linux/diann-1.8.1.8"
+DIANN = "/usr/diann/1.9.2_20241031/diann-linux"
+
+# This is how we might build the DIA-NN command:
+# generiere hier ein shell script. 
+
+
+
+rule diann_sh:
+    output:
+        script = "rundiann.sh"
+    input:
+	    get_converted_file
+    run:    
+        """Return the command that runs DIA-NN based on config and current folder."""
+        # Collect input .d directories or .mzML
+        # Same approach as in Makefile: find .d or .mzML
+
+        for key, value in config_dict["params"].items():
+            if value == "None":
+                config_dict["params"][key] = ""
+
+        DIANNCFG_PARTS = (
+        "--threads 64 --qvalue 0.01 --matrices --predictor",
+        "--met-excision --cut K*,R* --min-pep-len 6 --max-pep-len 30 --smart-profiling",
+        config_dict["params"]["DIANNVARMOD"],
+        config_dict["params"]["DIANNCFG0"],
+        config_dict["params"]["DIANNCFG1"],
+        config_dict["params"]["DIANNCFG4"],
+        config_dict["params"]["DIANNCFG5"],
+        config_dict["params"]["DIANNCFG6"],
+        config_dict["params"]["DIANNCFG7"],
+        config_dict["params"]["DIANNCFG8"],
+        )
+        DIANNCFG = " \\\n".join(DIANNCFG_PARTS)
+
+        diann_input_dirs = []
+        
+        for item in mzml_files:
+            diann_input_dirs.append(f"--f {item} ")
+        diann_input_str = " ".join(diann_input_dirs)
+        print(f"diann_input_str: {diann_input_str}")
+        
+        diann_fasta_arg = (f"--fasta-search --fasta {config_dict["params"]["DIANNFASTA0"]} "
+         f"--fasta {RAW_DIR}/order.fasta" if DIANNCUSTOMSEQ == "true" else "")
+
+        # Generate final command
+        cmd = (
+        f"#!/bin/bash \n"
+        f"set -ex \n"
+        f"mkdir -p {DIANNTEMP} \n"
+        f"mkdir -p {DIANNOUTPUT} \n"
+        f"nice -19 {DIANN} \\\n" 
+        f"{diann_fasta_arg} \\\n"
+        f"{diann_input_str} \\\n"
+        f"{DIANNCFG} \\\n"
+        f"--out-lib {DIANNOUTPUT}/WU{WORKUNITID}_report-lib.tsv --out-lib-copy \\\n"
+        f"--temp {DIANNTEMP} \\\n"
+        f"--out {DIANNOUTPUT}/WU{WORKUNITID}_report.tsv \\\n"
+        f"| tee diann.log.txt"
+        )
+        # Write the command to rundiann.sh
+        with open(output.script, "w") as f:
+            f.write(cmd)
+
+        # Make the script executable
+        os.chmod(output.script, 0o755)
+
+rule run_diann_sh:
+    input:
+        rules.diann_sh.output.script
+
+rule diann:
+    """
+    Runs DIA-NN on the .mzML (or .d) data, producing a final TSV report + logs.
+    The Makefile used a variable $(DIANNTMP) with lots of arguments.
+    """
+    input:
+        convert_done = mzml_files,      # after convert_all
+        diannsh = rules.diann_sh.output.script   # after write_rundiann
+
+        #unzip_done = [z.replace(".d.zip",".d") for z in dzip_files]
+    output:
+        # Key DIA-NN outputs
+        tsv_report = f"{DIANNOUTPUT}/WU{WORKUNITID}_report.tsv",
+        tsv_stats    = f"{DIANNOUTPUT}/WU{WORKUNITID}_report.stats.tsv",
+        diann_log  = "diann.log.txt",
+    shell:
+        f"""
+        echo {input.diannsh}
+        ./{input.diannsh}
+        """
+
+
+rule diannqc:
+    input:
+        stats_tsv=rules.diann.output.tsv_report,
+        report_tsv=rules.diann.output.tsv_stats
+    output:
+        pdf="{DIANNOUTPUT}/WU{WORKUNITID}_DIANN_qc_report.pdf"
+    params:
+        script="/home/bfabric/slurmworker/config/DIANN/DIA-NN-Plotter.py"
+    run:
+        shell(f"python3 {params.script} {input.stats_tsv} {input.report_tsv} {output.pdf}")
+
+
+
+
+rule run_diann:
+    input:
+        rules.diann.output.diann_log,
+        rules.diann.output.tsv_report
+
+rule print_variables:
+    """ 
+    This rule simply prints out the various configuration variables
+    we've defined in pure Python code.
+    """
+    run:
+        print(f"OUPUTZIP         = {OUPUTZIP}")
+        print(f"DIANNTEMP        = {DIANNTEMP}")
+        print(f"DIANNOUTPUT      = {DIANNOUTPUT}")
+        print(f"DIANN            = {DIANN}")
+        print(f"DIANNCFG         = {DIANNCFG}")
+
+        
+
+rule convert_raw:
+    """
+    Convert *.raw -> *.mzML using the 'convert_raw_to_format' command.
+    """
+    input:
+        raw_file = os.path.join(RAW_DIR, "{sample}.raw")
+    output:
+        mzml_file = os.path.join(RAW_DIR, "{sample}.mzML")
+    params:
+        msconvert = MSCONVERTOPTS
+    shell:
+        """
+        # echo "msconvert params: {params.msconvert}"
+        # ./convert_raw_to_mzML.sh {input.raw_file} {output.mzml_file}
+        docker run -t --rm -v $PWD:$PWD -w $PWD \
+            {params.msconvert} --outdir {RAW_DIR} {input.raw_file};
+        """
+
+rule convert_d_zip:
+    input:
+        raw_file = os.path.join(RAW_DIR, "{sample}.d.zip")
+    output:
+        # 'out' is a named output, so we can reference it in the downstream rule.
+        mzml_file = os.path.join(RAW_DIR, "{sample}.d")
+    shell:
+        """
+        echo "Unzipping {input} to {output}"
+        unzip -o {input.raw_file} -d {output.mzml_file}
+        """
+
+
+
+rule convert:
+    """
+    The 'convert' rule aggregates all final outputs (mzML files).
+    """
+    input:
+        mzml_files = expand(rules.convert_raw.output.mzml_file, sample=samples),
+        
+
+
+rule diannqc:
+    input:
+        stats_tsv=lambda wildcards: f"{find_last_out_dir()}/WU{wildcards.workunitid}_report.stats.tsv",
+        report_tsv=lambda wildcards: f"{find_last_out_dir()}/WU{wildcards.workunitid}_report.tsv"
+    output:
+        pdf="{diannoutput}/WU{workunitid}_DIANN_qc_report.pdf"
+    params:
+        script="/home/bfabric/slurmworker/config/DIANN/DIA-NN-Plotter.py"
+    run:
+        shell(f"python3 {params.script} {nput.stats_tsv} {nput.report_tsv} {output_pdf}")
+
+
+rule clean:
+    shell:
+        """
+        #rm -f {RAW_DIR}/*.mzML
+        rm rundiann.sh
+        rm -rf temp-2025*
+        rm -rf out-2025*
+        """
