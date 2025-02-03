@@ -1,42 +1,38 @@
-import os
-import glob
+from pathlib import Path
 
-RAW_DIR = "task2_raw"
+
+# Constants
+RAW_DIR = Path("task2_raw")
+MSCONVERT_OPTS = "docker.io/compomics/msconvert:latest"
 
 # Detect available file types
-dzip_files = glob.glob(os.path.join(RAW_DIR, "*.d.zip"))
-raw_files = glob.glob(os.path.join(RAW_DIR, "*.raw"))
-
-MSCONVERTOPTS = "docker.io/compomics/msconvert:latest"
+dzip_files = list(RAW_DIR.glob("*.d.zip"))
+raw_files = list(RAW_DIR.glob("*.raw"))
 
 # Ensure we only have one file type
 if dzip_files and raw_files:
     raise ValueError("Error: Both .d.zip and .raw files detected in the same run!")
 
-
-
 # Identify sample names dynamically
 if dzip_files:
-    SAMPLES = [os.path.basename(f).replace(".d.zip", "") for f in dzip_files]
+    SAMPLES = [f.stem.removesuffix(".d") for f in dzip_files]
 elif raw_files:
-    SAMPLES = [os.path.basename(f).replace(".raw", "") for f in raw_files]
+    SAMPLES = [f.stem for f in raw_files]
 else:
     raise ValueError("No valid input files (.d.zip or .raw) found.")
-
 
 rule all:
     input:
         "results.txt"
-
 
 ###############################################################################
 # Rule convert_d_zip: Extracts .d.zip into a .d folder
 ###############################################################################
 rule convert_d_zip:
     input:
-        raw_file = os.path.join(RAW_DIR, "{sample}.d.zip")
+        raw_file=RAW_DIR / "{sample}.d.zip"
     output:
-        raw_file = os.path.join(RAW_DIR, "{sample}.d")
+        raw_file=RAW_DIR / "{sample}.d"
     shell:
         """
         echo "Extracting {input.raw_file} -> {output.raw_file}"
@@ -46,17 +42,16 @@ rule convert_d_zip:
 ###############################################################################
 # Rule convert_raw: Converts .raw to .mzML
 ###############################################################################
-
 rule convert_raw:
     """
     Convert *.raw -> *.mzML using the 'convert_raw_to_format' command.
     """
     input:
-        raw_file = os.path.join(RAW_DIR, "{sample}.raw")
+        raw_file=RAW_DIR / "{sample}.raw"
     output:
-        raw_file = os.path.join(RAW_DIR, "{sample}.mzML")
+        raw_file=RAW_DIR / "{sample}.mzML"
     params:
-        msconvert = MSCONVERTOPTS
+        msconvert=MSCONVERT_OPTS
     shell:
         """
         echo "Extracting {input.raw_file} -> {output.raw_file}"
@@ -65,37 +60,23 @@ rule convert_raw:
 
 
 ###############################################################################
-# Helper function: Determine which input file to use
+# Helper functions: Determine which input file to use
 ###############################################################################
-def get_converted_file(wc):
-    """Returns the appropriate input file for downstream analysis."""
-    print("Checking for sample:", wc.sample)
-    print(dzip_files)
-    print(rules.convert_d_zip.output.raw_file)
-    if wc.sample in [os.path.basename(f).replace(".d.zip", "") for f in dzip_files]:
-        return rules.convert_d_zip.output.raw_file  # Reference the .d folder
-    else:
-        return rules.convert_raw.output.raw_file  # Reference the .mzML file
+def get_converted_file(sample : str):
+    """Returns the formatted output file path for a given sample."""
+    print(f"Checking for sample: {sample}")
 
-def get_converted_file2(sample):
-    print("Checking for sample:", sample)
-    # Ensure that dzip_files is defined and accessible here.
-    if sample in [os.path.basename(f).replace(".d.zip", "") for f in dzip_files]:
-        # Format the output file name with the sample value.
+    if dzip_files:
         return rules.convert_d_zip.output.raw_file.format(sample=sample)
-    else:
-        return rules.convert_raw.output.raw_file.format(sample=sample)
+    return rules.convert_raw.output.raw_file.format(sample=sample)
 
 rule downstream_analysis:
     input:
-        [get_converted_file2(sample) for sample in SAMPLES]
-        # get_converted_file  # Dynamically determines input
+        [get_converted_file(sample) for sample in SAMPLES]
     output:
         "results.txt"
-        #"results/{sample}.analysis"
     shell:
         """
         echo "Running analysis on {input} -> {output}"
         touch {output}
         """
-
