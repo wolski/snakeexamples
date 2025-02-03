@@ -24,6 +24,11 @@ else:
     raise ValueError("No valid input files (.d.zip or .raw) found.")
 
 
+rule all:
+    input:
+        "results.txt"
+
+
 ###############################################################################
 # Rule convert_d_zip: Extracts .d.zip into a .d folder
 ###############################################################################
@@ -72,21 +77,25 @@ def get_converted_file(wc):
     else:
         return rules.convert_raw.output.raw_file  # Reference the .mzML file
 
+def get_converted_file2(sample):
+    print("Checking for sample:", sample)
+    # Ensure that dzip_files is defined and accessible here.
+    if sample in [os.path.basename(f).replace(".d.zip", "") for f in dzip_files]:
+        # Format the output file name with the sample value.
+        return rules.convert_d_zip.output.raw_file.format(sample=sample)
+    else:
+        return rules.convert_raw.output.raw_file.format(sample=sample)
+
 rule downstream_analysis:
     input:
-        get_converted_file  # Dynamically determines input
+        [get_converted_file2(sample) for sample in SAMPLES]
+        # get_converted_file  # Dynamically determines input
     output:
-        "results/{sample}.analysis"
+        "results.txt"
+        #"results/{sample}.analysis"
     shell:
         """
         echo "Running analysis on {input} -> {output}"
         touch {output}
         """
 
-###############################################################################
-# Rule all: Final target
-###############################################################################
-
-rule all:
-    input:
-        expand(rules.downstream_analysis.output, sample=SAMPLES)
